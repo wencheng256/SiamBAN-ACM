@@ -12,6 +12,7 @@
 import sys
 import copy
 import collections
+import numpy as np
 
 try:
     import trax
@@ -30,7 +31,7 @@ class VOT(object):
         Args:
             region_format: Region format options
         """
-        assert(region_format in [trax.Region.RECTANGLE, trax.Region.POLYGON])
+        assert(region_format in [trax.Region.RECTANGLE, trax.Region.POLYGON, trax.Region.MASK])
 
         if channels is None:
             channels = ['color']
@@ -43,18 +44,20 @@ class VOT(object):
         else:
             raise Exception('Illegal configuration {}.'.format(channels))
 
-        self._trax = trax.Server([region_format], [trax.Image.PATH], channels)
+        self._trax = trax.Server([region_format], [trax.Image.PATH], channels, customMetadata=dict(vot="python"))
 
         request = self._trax.wait()
         assert(request.type == 'initialize')
         if isinstance(request.region, trax.Polygon):
             self._region = Polygon([Point(x[0], x[1]) for x in request.region])
+        elif isinstance(request.region, trax.Mask):
+            self._region = request.region.array(True)
         else:
             self._region = Rectangle(*request.region.bounds())
         self._image = [x.path() for k, x in request.image.items()]
         if len(self._image) == 1:
             self._image = self._image[0]
-        
+
         self._trax.status(request.region)
 
     def region(self):
@@ -75,9 +78,11 @@ class VOT(object):
         Arguments:
             region: region for the frame
         """
-        assert(isinstance(region, Rectangle) or isinstance(region, Polygon))
+        assert(isinstance(region, (Rectangle, Polygon, np.ndarray)))
         if isinstance(region, Polygon):
             tregion = trax.Polygon.create([(x.x, x.y) for x in region.points])
+        elif isinstance(region, np.ndarray):
+            tregion = trax.Mask.create(region)
         else:
             tregion = trax.Rectangle.create(region.x, region.y, region.width, region.height)
         properties = {}

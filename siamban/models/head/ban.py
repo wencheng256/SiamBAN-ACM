@@ -13,40 +13,8 @@ class BAN(nn.Module):
     def __init__(self):
         super(BAN, self).__init__()
 
-    def forward(self, z_f, x_f):
+    def forward(self, z_f, x_f, bbox):
         raise NotImplementedError
-
-class UPChannelBAN(BAN):
-    def __init__(self, feature_in=256, cls_out_channels=2):
-        super(UPChannelBAN, self).__init__()
-
-        cls_output = cls_out_channels
-        loc_output = 4
-
-        self.template_cls_conv = nn.Conv2d(feature_in, 
-                feature_in * cls_output, kernel_size=3)
-        self.template_loc_conv = nn.Conv2d(feature_in, 
-                feature_in * loc_output, kernel_size=3)
-
-        self.search_cls_conv = nn.Conv2d(feature_in, 
-                feature_in, kernel_size=3)
-        self.search_loc_conv = nn.Conv2d(feature_in, 
-                feature_in, kernel_size=3)
-
-        self.loc_adjust = nn.Conv2d(loc_output, loc_output, kernel_size=1)
-
-
-    def forward(self, z_f, x_f):
-        cls_kernel = self.template_cls_conv(z_f)
-        loc_kernel = self.template_loc_conv(z_f)
-
-        cls_feature = self.search_cls_conv(x_f)
-        loc_feature = self.search_loc_conv(x_f)
-
-        cls = xcorr_fast(cls_feature, cls_kernel)
-        loc = self.loc_adjust(xcorr_fast(loc_feature, loc_kernel))
-        return cls, loc
-
 
 class DepthwiseXCorr(nn.Module):
     def __init__(self, in_channels, hidden, out_channels, kernel_size=3):
@@ -62,17 +30,44 @@ class DepthwiseXCorr(nn.Module):
                 nn.ReLU(inplace=True),
                 )
         self.head = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
+                nn.Conv2d(hidden, hidden, kernel_size=3, bias=True, padding=1),
                 nn.BatchNorm2d(hidden),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels, kernel_size=1)
+                nn.Conv2d(hidden, out_channels, kernel_size=3, padding=1)
                 )
-        
 
-    def forward(self, kernel, search):
+        self.xorr_bbox = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, hidden, bias=False)
+        )
+
+        self.xorr_search = nn.Conv2d(hidden, hidden, kernel_size=5, bias=False)
+        self.xorr_kernel = nn.Conv2d(hidden, hidden, kernel_size=5, bias=True)
+
+        self.xorr_activate = nn.Sequential(
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, bias=True, padding=1),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True)
+        )
+
+    def init(self, kernel, bbox):
         kernel = self.conv_kernel(kernel)
+        kernel_part = self.xorr_kernel(kernel)
+        bbox_part = self.xorr_bbox(bbox[:, 2:]).view(*kernel_part.shape)
+        self.kernel_part = kernel_part
+        self.bbox_part = bbox_part
+
+    def track(self, search):
         search = self.conv_search(search)
-        feature = xcorr_depthwise(search, kernel)
+        search_part = self.xorr_search(search)
+        feature = self.xorr_activate(search_part + self.kernel_part + self.bbox_part)
         out = self.head(feature)
         return out
 
@@ -83,9 +78,13 @@ class DepthwiseBAN(BAN):
         self.cls = DepthwiseXCorr(in_channels, out_channels, cls_out_channels)
         self.loc = DepthwiseXCorr(in_channels, out_channels, 4)
 
-    def forward(self, z_f, x_f):
-        cls = self.cls(z_f, x_f)
-        loc = self.loc(z_f, x_f)
+    def init(self, z_f, bbox):
+        self.cls.init(z_f, bbox)
+        self.loc.init(z_f, bbox)
+
+    def track(self, x_f):
+        cls = self.cls.track(x_f)
+        loc = self.loc.track(x_f)
         return cls, loc
 
 
@@ -100,12 +99,17 @@ class MultiBAN(BAN):
             self.loc_weight = nn.Parameter(torch.ones(len(in_channels)))
         self.loc_scale = nn.Parameter(torch.ones(len(in_channels)))
 
-    def forward(self, z_fs, x_fs):
+    def init(self, z_fs, bbox):
+        for idx, z_f in enumerate(z_fs, start=2):
+            box = getattr(self, 'box'+str(idx))
+            box.init(z_f, bbox)
+
+    def track(self, x_fs):
         cls = []
         loc = []
-        for idx, (z_f, x_f) in enumerate(zip(z_fs, x_fs), start=2):
+        for idx, x_f in enumerate(x_fs, start=2):
             box = getattr(self, 'box'+str(idx))
-            c, l = box(z_f, x_f)
+            c, l = box.track(x_f)
             cls.append(c)
             loc.append(torch.exp(l*self.loc_scale[idx-2]))
 
