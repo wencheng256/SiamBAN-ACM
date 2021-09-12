@@ -13,6 +13,13 @@ This paper has been accepted by CVPR2021
 }
 ```
 
+## weights and raw results
+raw results [url](https://iiai-wencheng2.oss-cn-hongkong.aliyuncs.com/acm_raw_results.zip)
+
+config and weights for LaSOT [url](https://iiai-wencheng2.oss-cn-hongkong.aliyuncs.com/LaSOT_weight_config.zip)
+
+config weights for VOT [url](https://iiai-wencheng2.oss-cn-hongkong.aliyuncs.com/weight_VOT2019.zip)
+
 
 ## Installation
 
